@@ -4,6 +4,8 @@
 /node_modules
 /.pnp
 .pnp.js
+.idea/
+
 
 # testing
 /coverage
@@ -30,3 +32,6 @@ yarn-error.log*
 
 # vercel
 .vercel
+
+# Custom
+.env
