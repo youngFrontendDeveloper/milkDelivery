@@ -1,58 +1,162 @@
 import styles from "../../styles/Form.module.scss";
-import { YMaps } from "@pbe/react-yandex-maps";
-import { useEffect, useState } from "react";
+import {
+  FullscreenControl,
+  Map,
+  Placemark,
+  useYMaps,
+  ZoomControl,
+  Polygon, SearchControl,
+} from "@pbe/react-yandex-maps";
+import React, { useEffect, useId, useMemo, useState } from "react";
 import { useDebounce } from "../../hooks/useDebounce";
+import data from "../../const/data.json";
 
-const INPUT_DEBOUNCE_DELAY = 300;
+console.log( data.features.geometry.coordinates );
+const INPUT_DEBOUNCE_DELAY = 500;
+
+const getGeocodeError = (obj) => {
+  if( !obj ) {
+    return {
+      error: "Адрес не найден",
+      hint: "Уточните адрес"
+    };
+  }
+
+  const precision = obj.properties.get( "metaDataProperty.GeocoderMetaData.precision" );
+
+  switch( precision ) {
+    case "exact":
+      return;
+    case "number":
+    case "near":
+    case "range":
+      return {
+        error: "Неточный адрес, требуется уточнение",
+        hint: "Уточните номер дома"
+      };
+    case "street":
+      return {
+        error: "Неполный адрес, требуется уточнение",
+        hint: "Уточните номер дома"
+      };
+    case "other":
+    default:
+      return {
+        error: "Неполный адрес, требуется уточнение",
+        hint: "Уточните адрес"
+      };
+  }
+
+  return;
+};
 
 function InputAddress(props) {
-  const [ value, setValue ] = useState( "" );
-  const debouncedValue = useDebounce( value, INPUT_DEBOUNCE_DELAY );
-  const [ isSuggestionsShown, setSuggestionsShown ] = useState( false );
-  const [ responseList, setResponseList ] = useState( [] );
-  const [ location, setLocation ] = useState();
+  const suggestInputId = useId();
+  const [ fullAddress, setFullAddress ] = useState( "" );
+  const debouncedAddress = useDebounce( fullAddress, INPUT_DEBOUNCE_DELAY );
+  const [ hint, setHint ] = useState( "" );
+  const [ error, setError ] = useState( "" );
+  const [ geoobj, setGeoobj ] = useState();
 
-  const handleChange = (e) => {
-    const value = e.target.value;
+  const ymaps = useYMaps( [ "SuggestView", "geocode", "util.bounds" ] );
 
-    if( value === "" ) {
-      setValue( "" );
-      setResponseList( [] );
-    } else {
-      setValue( value );
+  const mapState = useMemo( () => {
+    return geoobj
+      ? ymaps.util.bounds.getCenterAndZoom(
+        geoobj.properties.get( "boundedBy" ),
+        [ "100%", 300 ]
+      )
+      : {
+        center: [ 55.751574, 37.573856 ],
+        zoom: 9
+      };
+  }, [ geoobj ] );
+
+
+  const geocode = async(value) => {
+    if( !value ) {
+      return;
     }
+
+    const res = await ymaps.geocode( value );
+
+    const obj = res.geoObjects.get( 0 );
+    const geocodeError = getGeocodeError( obj );
+
+    return {
+      error: geocodeError && geocodeError.error,
+      hint: geocodeError && geocodeError.hint,
+      geoobj: obj
+    };
   };
 
-  const handleSuggestionClick = (loc) => {
-    setLocation( loc );
-  };
-
-  const handleShowSuggestions = () => {
-    setSuggestionsShown( true );
-  };
-  const handleHideSuggestions = () => {
-    setSuggestionsShown( false );
-  };
 
   useEffect( () => {
-    ( async() => {
-      if( !debouncedValue ) {
-        return;
+    if( !ymaps ) {
+      return;
+    }
+
+    const suggestView = new ymaps.SuggestView( suggestInputId );
+
+    const handleSuggestSelect = async(event) => {
+      const nextValue = event.originalEvent.item.value;
+      const geocodeRes = await geocode( nextValue );
+
+      if( geocodeRes.error ) {
+        setError( geocodeRes.error );
+        setHint( geocodeRes.hint );
+      } else {
+        setGeoobj( geocodeRes.geoobj );
       }
 
-      const res = await fetch( `https://nominatim.openstreetmap.org/search/${ debouncedValue }?format=json&addressdetails=1&limit=10` ).then( res => res.json() );
+      setFullAddress( nextValue );
+    };
 
-      if( Array.isArray( res ) && res.length > 0 ) {
-        setResponseList( res );
-      }
-    } )();
-  }, [ debouncedValue ] );
+    suggestView.events.add( "select", handleSuggestSelect );
+
+    return () => {
+      suggestView.events.remove( "select", handleSuggestSelect );
+    };
+  }, [ ymaps, suggestInputId ] );
 
   useEffect( () => {
+    if( !debouncedAddress ) {
+      return;
+    }
+
+    geocode( debouncedAddress );
+  }, [ debouncedAddress ] );
+
+
+  useEffect( () => {
+    setHint( "" );
+    setError( "" );
+  }, [ fullAddress ] );
+
+  const handleChange = (geoobj, mapState) => {
+    if( !geoobj || !mapState ) {
+      return props.onChange( {
+        location: "",
+        street: "",
+        house: "",
+        coordinates: [],
+      } );
+    }
+
     if( typeof props.onChange === "function" ) {
-      props.onChange( location );
+      props.onChange( {
+        location: geoobj.getLocalities().join( ", " ),
+        street: geoobj.getThoroughfare(),
+        house: geoobj.getPremiseNumber(),
+        coordinates: mapState.center,
+      } );
     }
-  }, [ location ] );
+  };
+
+  useEffect( () => {
+    handleChange( geoobj, mapState );
+  }, [ geoobj, mapState ] );
+
 
   return (
     <>
@@ -60,29 +164,52 @@ function InputAddress(props) {
         <p className={ styles.form__item }>
           <label htmlFor="locality" className={ styles.form__label }>Выберите адрес:</label>
           <input
-            value={ value }
-            onChange={ handleChange }
-            onFocus={ handleShowSuggestions }
-            onBlur={ handleHideSuggestions }
-            className="form__input"
+            defaultValue={ props.defaultValue }
+            className={ styles.form__input }
             type="text"
-            id="address"
-            name="address"
+            id={ suggestInputId }
+            onChange={ () => setGeoobj( undefined ) }
+            onBlur={ () => handleChange( geoobj, mapState ) }
           />
-
         </p>
-
-        { isSuggestionsShown &&
-          <div>
-            { responseList.map( (item, i) => <div
-              key={ i } onClick={ () => handleSuggestionClick( item ) }
-            >
-              { item.display_name }
-              {/*{ item.address.city }, { item.address.road }, { item.address.house_number }*/ }
-            </div> ) }
-          </div>
-        }
       </div>
+      { props.errors && <p
+        className={ styles.error }
+      >
+        { props.errors.message }
+      </p> }
+
+      <div>
+        <p
+          className={ styles.error }
+        >{ error }</p>
+        <p
+          className={ styles.error }
+        > { hint }</p>
+      </div>
+
+      <Map
+        className={ styles.map }
+        state={ mapState }
+        modules={ [ "Placemark" ] }
+      >
+
+        <Polygon
+          geometry={ data.features.geometry.coordinates }
+          options={ {
+            fillColor: "#00FF00",
+            strokeColor: "#0000FF",
+            opacity: 0.5,
+            strokeWidth: 5,
+            strokeStyle: "shortdash",
+          } }
+        />
+        <ZoomControl />
+        <FullscreenControl />
+        {/*<GeolocationControl />*/ }
+        {/*<SearchControl />*/ }
+        { geoobj && mapState && mapState.center && <Placemark geometry={ mapState.center } /> }
+      </Map>
     </>
   );
 }
